@@ -93,4 +93,301 @@ pairs of people, creating more opportunities for a shared birthday.
 
 # Problem 2: Longitudinal study
 
+## Import participant files
+
+```{r study-import}
+study_files =
+  tibble(
+    file_path = list.files(
+      path = "data",
+      pattern = "\\.csv$",
+      recursive = TRUE,
+      full.names = TRUE
+    )
+  ) |>
+  mutate(
+    file_name = basename(file_path)
+  )
+
+study_nested =
+  study_files |>
+  mutate(
+    data = map(file_path, read_csv, show_col_types = FALSE)
+  )
+
+nrow(study_nested)
+
+study_nested |>
+  select(file_name, data)
+
+study_nested$data[[1]]
+```
+
+## Tidy the data
+
+```{r study-tidy}
+study_df =
+  study_nested |>
+  select(file_name, data) |>
+  mutate(
+    subject_id = str_remove(file_name, "\\.csv$"),
+    arm = recode(
+      str_sub(subject_id, 1, 3),
+      con = "Control",
+      exp = "Experimental"
+    )
+  ) |>
+  unnest(cols = data) |>
+  pivot_longer(
+    cols = starts_with("week_"),
+    names_to = "week",
+    names_prefix = "week_",
+    values_to = "outcome"
+  ) |>
+  mutate(
+    week = as.integer(week)
+  ) |>
+  select(subject_id, arm, week, outcome) |>
+  arrange(arm, subject_id, week)
+
+dim(study_df)
+
+study_df |>
+  head(8) |>
+  knitr::kable(
+    caption = "Weekly observations for the first participant"
+  )
+```
+
+I combined the participant files using map() and unnest(), extracted
+participant IDs and study arms from the filenames, and reshaped the
+weekly measurements into long format. Participant IDs retain the arm
+prefix to distinguish participants with the same number in different arms.
+
+The tidy dataset contains 160 observations from 20 participants:
+10 in the control arm and 10 in the experimental arm. Each participant
+has measurements at eight weeks. Each row represents one participant
+at one week, with columns for participant ID, study arm, week, and outcome.
+
+## Plot individual trajectories
+
+```{r study-spaghetti}
+study_df |>
+  ggplot(
+    aes(
+      x = week,
+      y = outcome,
+      group = subject_id,
+      color = arm
+    )
+  ) +
+  geom_line(alpha = 0.7, linewidth = 0.7) +
+  geom_point(size = 1.5) +
+  facet_grid(. ~ arm) +
+  scale_x_continuous(breaks = 1:8) +
+  scale_color_manual(
+    values = c(
+      "Control" = "#287D8E",
+      "Experimental" = "#E76F51"
+    )
+  ) +
+  labs(
+    title = "Weekly outcomes by study arm",
+    x = "Week",
+    y = "Outcome",
+    caption = "Each line represents one participant"
+  ) +
+  theme(legend.position = "none")
+```
+
+The control arm shows fluctuations over time without a clear overall
+upward or downward trend. In contrast, participants in the experimental
+arm generally show increasing outcomes over the eight weeks.
+Both arms show differences between participants and week-to-week
+variation within participants.
+
 # Problem 3: Power of a one-sample t-test
+
+## Simulation design
+
+I simulated samples of 30 observations from normal distributions with
+a population standard deviation of 5. The true means ranged from 0 to 6.
+For each sample, I performed a two-sided one-sample t-test of a population
+mean of zero, using a significance level of 0.05.
+
+```{r t-test-function}
+sim_t_test = function(mu, n = 30, sigma = 5) {
+  sample_data = rnorm(
+    n = n,
+    mean = mu,
+    sd = sigma
+  )
+
+  t.test(
+    sample_data,
+    mu = 0,
+    alternative = "two.sided"
+  ) |>
+    broom::tidy() |>
+    select(
+      mu_hat = estimate,
+      p_value = p.value
+    )
+}
+
+set.seed(1)
+
+sim_t_test(mu = 0)
+```
+
+## Repeat the simulation
+
+```{r t-test-simulation}
+set.seed(1)
+
+test_results =
+  expand_grid(
+    true_mu = 0:6,
+    iteration = 1:5000
+  ) |>
+  mutate(
+    result = map(true_mu, sim_t_test)
+  ) |>
+  unnest(cols = result) |>
+  mutate(
+    reject = p_value < 0.05
+  )
+
+dim(test_results)
+
+power_summary =
+  test_results |>
+  group_by(true_mu) |>
+  summarise(
+    n_sim = n(),
+    n_reject = sum(reject),
+    rejection_rate = mean(reject),
+    mean_estimate = mean(mu_hat),
+    mean_estimate_rejected = mean(mu_hat[reject]),
+    .groups = "drop"
+  )
+
+knitr::kable(
+  power_summary,
+  digits = 3,
+  caption = "Simulation results by true population mean"
+)
+```
+
+## Rejection rate and power
+
+```{r power-plot}
+power_summary |>
+  ggplot(aes(x = true_mu, y = rejection_rate)) +
+  geom_hline(
+    yintercept = 0.05,
+    linetype = "dashed",
+    color = "grey55"
+  ) +
+  geom_line(color = "#287D8E", linewidth = 1) +
+  geom_point(color = "#287D8E", size = 2) +
+  scale_x_continuous(breaks = 0:6) +
+  scale_y_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    limits = c(0, 1)
+  ) +
+  labs(
+    title = "Rejection rate of a one-sample t-test",
+    subtitle = "n = 30; population SD = 5; 5,000 simulations per mean",
+    x = "True population mean",
+    y = "Proportion of tests rejected",
+    caption = "Dashed line: 5% significance level"
+  )
+```
+
+With sample size and population standard deviation fixed, power increases
+as the true mean moves farther from the null value of zero.
+The estimated power is 18.9% at a true mean of 1 and 88.7% at a true
+mean of 3. At true means of 5 and 6, all 5,000 simulations reject the
+null hypothesis, giving empirical rejection rates of 100%.
+
+When the true mean is zero, the null hypothesis is true. The rejection
+rate of approximately 5.1% therefore estimates the Type I error rate,
+which is close to the chosen significance level of 5%.
+
+## Compare mean estimates
+
+```{r mean-estimate-plot}
+estimate_plot_df =
+  power_summary |>
+  select(true_mu, mean_estimate, mean_estimate_rejected) |>
+  pivot_longer(
+    cols = starts_with("mean_estimate"),
+    names_to = "samples_used",
+    values_to = "average_estimate"
+  ) |>
+  mutate(
+    samples_used = recode(
+      samples_used,
+      mean_estimate = "All samples",
+      mean_estimate_rejected = "Rejected tests only"
+    )
+  )
+
+estimate_plot_df |>
+  ggplot(
+    aes(
+      x = true_mu,
+      y = average_estimate,
+      color = samples_used,
+      shape = samples_used
+    )
+  ) +
+  geom_abline(
+    intercept = 0,
+    slope = 1,
+    linetype = "dashed",
+    color = "grey55"
+  ) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  scale_color_manual(
+    values = c(
+      "All samples" = "#287D8E",
+      "Rejected tests only" = "#E76F51"
+    )
+  ) +
+  scale_shape_manual(
+    values = c(
+      "All samples" = 16,
+      "Rejected tests only" = 17
+    )
+  ) +
+  scale_x_continuous(breaks = 0:6) +
+  scale_y_continuous(breaks = 0:6) +
+  labs(
+    title = "Mean estimates across simulated samples",
+    x = "True population mean",
+    y = "Average estimated mean",
+    color = NULL,
+    shape = NULL,
+    caption = "Dashed line: average estimate equals the true mean"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+Across all simulated samples, the average estimated mean is close to
+the true mean, consistent with the sample mean being an unbiased estimator.
+
+Restricting the analysis to rejected tests produces upward bias for small
+positive true means. For example, when the true mean is 1, the average
+estimate is approximately 0.996 across all samples but 2.214 among
+rejected tests. Statistical significance depends on the estimated mean
+relative to its standard error. With a small positive true effect,
+rejected tests disproportionately include samples with upward fluctuations
+in their estimated means.
+
+As the true effect increases and power approaches one, most samples
+are retained, so the two averages become similar. At a true mean of zero,
+positive and negative significant estimates approximately balance in
+this two-sided test, leaving their average close to zero.
